@@ -1,18 +1,5 @@
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.FileReader;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Scanner;
-
-import org.jivesoftware.smack.AbstractXMPPConnection;
-import org.jivesoftware.smack.SmackConfiguration;
-import org.jivesoftware.smack.SmackException;
-import org.jivesoftware.smack.XMPPException;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.jivesoftware.smack.*;
 import org.jivesoftware.smack.chat.Chat;
 import org.jivesoftware.smack.chat.ChatManager;
 import org.jivesoftware.smack.packet.Message;
@@ -21,15 +8,18 @@ import org.jivesoftware.smack.packet.Stanza;
 import org.jivesoftware.smack.roster.Roster;
 import org.jivesoftware.smack.roster.RosterEntry;
 import org.jivesoftware.smack.tcp.XMPPTCPConnection;
+import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration;
+import org.jivesoftware.smack.util.TLSUtils;
 import org.jivesoftware.smackx.carbons.CarbonManager;
 import org.jivesoftware.smackx.carbons.packet.CarbonExtension;
 import org.jivesoftware.smackx.muc.MultiUserChat;
 import org.jivesoftware.smackx.muc.MultiUserChatException;
 import org.jivesoftware.smackx.muc.MultiUserChatManager;
+import org.jivesoftware.smackx.muc.RoomInfo;
 import org.jivesoftware.smackx.omemo.OmemoConfiguration;
 import org.jivesoftware.smackx.omemo.OmemoManager;
 import org.jivesoftware.smackx.omemo.OmemoMessage;
-import org.jivesoftware.smackx.omemo.exceptions.UndecidedOmemoIdentityException;
+import org.jivesoftware.smackx.omemo.exceptions.*;
 import org.jivesoftware.smackx.omemo.internal.OmemoCachedDeviceList;
 import org.jivesoftware.smackx.omemo.internal.OmemoDevice;
 import org.jivesoftware.smackx.omemo.listener.OmemoMessageListener;
@@ -40,11 +30,11 @@ import org.jivesoftware.smackx.omemo.signal.SignalOmemoService;
 import org.jivesoftware.smackx.omemo.trust.OmemoFingerprint;
 import org.jivesoftware.smackx.omemo.trust.OmemoTrustCallback;
 import org.jivesoftware.smackx.omemo.trust.TrustState;
-
-import org.jline.reader.EndOfFileException;
+import org.jivesoftware.smackx.pubsub.PubSubException;
+import org.jivesoftware.smackx.pubsub.PubSubManager;
+import org.jivesoftware.smackx.xdata.Form;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
-import org.jline.reader.UserInterruptException;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import org.jxmpp.jid.BareJid;
@@ -53,6 +43,14 @@ import org.jxmpp.jid.impl.JidCreate;
 import org.jxmpp.jid.parts.Resourcepart;
 import org.jxmpp.stringprep.XmppStringprepException;
 import org.whispersystems.libsignal.IdentityKey;
+
+import java.io.*;
+import java.net.InetAddress;
+import java.security.Security;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Scanner;
 
 
 /**
@@ -64,16 +62,18 @@ import org.whispersystems.libsignal.IdentityKey;
 public class Main {
     private AbstractXMPPConnection connection;
     private OmemoManager omemoManager;
-
+    private MultiUserChatManager mucm;
     private final static File storePath = new File("store");
-
+    private int sendCounter = 0;
+    private int receiveCounter = 0;
+    private int totalNumberOfMessage = 1;
+    private static String GJID,GPASSWORD;
+    private static String rootName;
+    String jidname;
     private Main() {
-        /*
-        SmackConfiguration.DEBUG = true;
-        /*/
         SmackConfiguration.DEBUG = false;
-        //*/
         OmemoConfiguration.setAddOmemoHintBody(false);
+        Security.addProvider(new BouncyCastleProvider());
     }
 
     public void start() throws Exception {
@@ -84,7 +84,10 @@ public class Main {
         String prompt = "> ";
 
         Scanner scanner = new Scanner(System.in);
-        String jidname = null, password = null;
+        jidname = null;
+        String password = null;
+        jidname = GJID;
+        password = GPASSWORD;
         while(jidname == null) {
             System.out.println("Enter username:");
             jidname = scanner.nextLine();
@@ -93,14 +96,24 @@ public class Main {
             System.out.println("Enter password:");
             password = scanner.nextLine();
         }
-        connection = new XMPPTCPConnection(jidname, password);
-
+        XMPPTCPConnectionConfiguration.Builder configBuilder = XMPPTCPConnectionConfiguration.builder()
+                .setUsernameAndPassword(jidname,password)
+                .setXmppDomain("ckotha.com")
+                .setHostAddress(InetAddress.getByName("157.230.36.183"))
+                .setResource("omemo")
+                .setSecurityMode(ConnectionConfiguration.SecurityMode.ifpossible)
+                .setPort(5222);
+        TLSUtils.acceptAllCertificates(configBuilder);
+        TLSUtils.disableHostnameVerificationForTlsCertificates(configBuilder);
+        XMPPTCPConnectionConfiguration config = configBuilder.build();
+        connection = new XMPPTCPConnection(config);
         SignalOmemoService.acknowledgeLicense();
         SignalOmemoService.setup();
         SignalOmemoService service = (SignalOmemoService) SignalOmemoService.getInstance();
         service.setOmemoStoreBackend(new SignalCachingOmemoStore(new SignalFileBasedOmemoStore(storePath)));
 
         omemoManager = OmemoManager.getInstanceFor(connection);
+	delete_invalid_Directory();
         omemoManager.setTrustCallback(new OmemoTrustCallback() {
             @Override
             public TrustState getTrust(OmemoDevice device, OmemoFingerprint fingerprint) {
@@ -121,10 +134,36 @@ public class Main {
                 }
             }
         });
+        connection.addConnectionListener(new ConnectionListener() {
+            @Override
+            public void connected(XMPPConnection connection) {
+                System.out.println("Connection Successful");
+            }
+
+            @Override
+            public void authenticated(XMPPConnection connection, boolean resumed) {
+                System.out.println("Login Successful");
+            }
+
+            @Override
+            public void connectionClosed() {
+                System.out.println("Connection Closed");
+            }
+
+            @Override
+            public void connectionClosedOnError(Exception e) {
+                System.out.println("Connection ClosedOnError: " + e.getMessage());
+            }
+        });
         connection.setReplyTimeout(10000);
         connection = connection.connect();
         connection.login();
         omemoManager.initialize();
+
+        // Create the XMPP address (JID) of the MUC.
+        EntityBareJid mucJid = JidCreate.entityBareFrom(rootName+"grptestuu@conference.ckotha.com");
+
+        Resourcepart nickname = Resourcepart.from(rootName+"bot");
 
         System.out.println("Logged in. Begin setting up OMEMO...");
 
@@ -136,6 +175,16 @@ public class Main {
                     return;
                 }
                 String decryptedBody = received.getBody();
+                String check = "%%@";
+
+                int compare = decryptedBody.compareTo( check );
+
+                if(compare == 0){
+                    return;
+                }
+                
+                
+                    
                 if (sender != null && decryptedBody != null) {
                     reader.callWidget(LineReader.CLEAR);
                     reader.getTerminal().writer().println("\033[34m" + sender + ": " + decryptedBody);
@@ -153,6 +202,7 @@ public class Main {
         OmemoMucMessageListener mucMessageListener = (multiUserChat, stanza, received) -> {
             BareJid bareJid = received.getSenderDevice().getJid();
             if (received.isKeyTransportMessage()) {
+                System.out.println("Got keyTransported message for muc: "+bareJid.toString());
                 return;
             }
             String s = received.getBody();
@@ -163,10 +213,18 @@ public class Main {
                 reader.callWidget(LineReader.REDISPLAY);
                 reader.getTerminal().writer().flush();
             }
+            // if(s!=null){
+            //     increaseReceiveCounter();
+            //     try {
+            //         sendMucMessage(mucJid, "Hi There! I am message no." + sendCounter + " from " + connection.getUser().asEntityBareJidString());
+            //     } catch (IOException | SmackException.NotLoggedInException | InterruptedException | CannotEstablishOmemoSessionException | PubSubException.NotALeafNodeException | XMPPException.XMPPErrorException | SmackException.NotConnectedException | CorruptedOmemoKeyException | SmackException.NoResponseException | UndecidedOmemoIdentityException | NoOmemoSupportException | CryptoFailedException e) {
+            //         e.printStackTrace();
+            //     }
+            // }
         };
 
         // Carbon Copies
-        CarbonManager.getInstanceFor(connection).enableCarbons();
+//        CarbonManager.getInstanceFor(connection).enableCarbons();
 
         omemoManager.addOmemoMessageListener(messageListener);
         omemoManager.addOmemoMucMessageListener(mucMessageListener);
@@ -184,13 +242,13 @@ public class Main {
         }));
 
         // Group Chats
-        MultiUserChatManager mucm = MultiUserChatManager.getInstanceFor(connection);
+        mucm = MultiUserChatManager.getInstanceFor(connection);
         mucm.setAutoJoinOnReconnect(true);
         mucm.addInvitationListener((xmppConnection, multiUserChat, entityFullJid, s, s1, message, invite) -> {
             try {
-                multiUserChat.join(Resourcepart.from("OMEMO"));
+                multiUserChat.join(Resourcepart.from(GJID));
                 multiUserChat.addMessageListener(message1 -> {
-                    System.out.println("MUC: "+message1.getFrom()+": "+message1.getBody());
+
                 });
                 System.out.println("Joined Room "+multiUserChat.getRoom().asBareJid().toString());
             } catch (SmackException.NoResponseException | XMPPException.XMPPErrorException | InterruptedException | MultiUserChatException.NotAMucServiceException | SmackException.NotConnectedException | XmppStringprepException e) {
@@ -201,15 +259,15 @@ public class Main {
         Chat current = null;
         boolean omemo = false;
 
+
         // Begin REPL
         while (true) {
             String line = null;
             try {
                 line = reader.readLine(prompt);
-            } catch (UserInterruptException e) {
-                // Ignore
-            } catch (EndOfFileException e) {
-                return;
+            } catch (Exception e) {
+                e.printStackTrace();
+                continue;
             }
             String [] split = line.split(" ");
 
@@ -227,12 +285,25 @@ public class Main {
                     }
                 }
             }
-
             // Exit the client
             else if (line.startsWith("/quit")) {
                 scanner.close();
                 connection.disconnect(new Presence(Presence.Type.unavailable, "Smack is still alive :D", 100, Presence.Mode.away));
                 break;
+            }
+            else if (line.startsWith("/testresult")) {
+                System.out.println("Total send: " + sendCounter);
+                System.out.println("Total received: " + receiveCounter);
+            }
+            else if (line.startsWith("/resetcounter")) {
+                sendCounter = 0;
+                receiveCounter = 0;
+            }
+            else if (line.startsWith("/start")) {
+//                if(split.length == 2){
+                    sendMucMessage(mucJid,"Hi There! I am the first message.");
+                    sendCounter = 1;
+//                }
             }
 
             // Add contacts
@@ -275,7 +346,7 @@ public class Main {
                         for(Presence p : presences) {
                             System.out.println(p.getFrom());
                         }
-                    } catch (Exception e) {}
+                    } catch (Exception ignored) {}
                     omemoManager.requestDeviceListUpdateFor(jid);
                     OmemoCachedDeviceList list = service.getOmemoStoreBackend().loadCachedDeviceList(omemoManager.getOwnDevice(), jid);
                     if(list == null) {
@@ -299,48 +370,77 @@ public class Main {
                     }
                 }
             }
-
             // Make trust decisions for keys of a user
-            else if(line.startsWith("/trust")) {
+            else if(line.startsWith("/trust ")) {
                 if(split.length == 2) {
                     System.out.println("Usage: \n0: Untrusted, 1: Trusted, otherwise: Undecided");
-                    BareJid jid = getJid(split[1]);
+                    BareJid jid = getJid(split[1] + "@ckotha.com");
 
                     if(jid == null) {
                         continue;
                     }
 
                     System.out.println(jid);
-
-                    omemoManager.requestDeviceListUpdateFor(jid);
-
-
-                    for (OmemoDevice device : omemoManager.getDevicesOf(jid)) {
-                        OmemoFingerprint fp = omemoManager.getFingerprint(device);
-
-                        if (omemoManager.isDecidedOmemoIdentity(device, fp)) {
-                            if (omemoManager.isTrustedOmemoIdentity(device, fp)) {
-                                System.out.println("Status: Trusted");
-                            } else {
-                                System.out.println("Status: Untrusted");
-                            }
-                        } else {
-                            System.out.println("Status: Undecided");
-                        }
-
-                        System.out.println(fp.blocksOf8Chars());
-                        String decision = scanner.nextLine();
-                        if (decision.equals("0")) {
-                            omemoManager.distrustOmemoIdentity(device, fp);
-                            System.out.println("Identity has been untrusted.");
-                        } else if (decision.equals("1")) {
-                            omemoManager.trustOmemoIdentity(device, fp);
-                            System.out.println("Identity has been trusted.");
-                        }
-                    }
+                    trustUser(jid);
                 }
 
             }
+            // Make trust decisions for all user
+            else if(line.startsWith("/trust")) {
+                System.out.println("Trusting all users");
+                for(int i=1;i<12;i++) {
+                    BareJid jid = getJid("p" + i + "@ckotha.com");
+
+                    if (jid == null) {
+                        continue;
+                    }
+                    System.out.println(jid);
+                    trust(jid);
+                }
+                BareJid sender = getJid(jidname+"@ckotha.com");
+
+                for(int i=1;i<12;i++) {
+                    BareJid recipient = getJid("p" + i + "@ckotha.com");
+                    if(sender == recipient){
+                        continue;
+                    }
+                    if (recipient != null) {
+                        String message = "%%@";
+                        
+                        OmemoMessage.Sent encrypted = null;
+                        try {
+                            encrypted = omemoManager.encrypt(recipient, message.trim());
+                        } catch (UndecidedOmemoIdentityException e) {
+                            System.out.println("There are undecided identities:");
+                            for(OmemoDevice d : e.getUndecidedDevices()) {
+                                System.out.println(d.toString());
+                                BareJid jid = getJid(d.toString().split(":")[0]);
+                                trustUser(jid);
+                            }
+                        } catch (SmackException.NotConnectedException | IOException | CryptoFailedException | SmackException.NotLoggedInException | SmackException.NoResponseException | InterruptedException e){
+                            e.printStackTrace();
+                        }
+                        if(encrypted == null){
+                            encrypted = omemoManager.encrypt(recipient, message.trim());
+                            System.out.println("Trying to encrypt after trusting some undecided user");
+                        }
+                        if(encrypted != null) {
+                            current = cm.createChat(recipient.asEntityJidIfPossible());
+                            Message m = new Message();
+                            m.addExtension(encrypted.getElement());
+                            current.sendMessage(m);
+                        }
+                    }
+               
+                omemo = true;
+                }
+                
+                
+                 
+                    
+
+            }
+
 
             // Delete foreign OMEMO devices from own device list
             else if(line.startsWith("/purge")) {
@@ -355,7 +455,7 @@ public class Main {
             else if(line.startsWith("/omemo")) {
                 if(split.length == 1) {
                 } else {
-                    BareJid recipient = getJid(split[1]);
+                    BareJid recipient = getJid(split[1] + "@ckotha.com");
                     if (recipient != null) {
                         String message = "";
                         for (int i = 2; i < split.length; i++) {
@@ -368,7 +468,15 @@ public class Main {
                             System.out.println("There are undecided identities:");
                             for(OmemoDevice d : e.getUndecidedDevices()) {
                                 System.out.println(d.toString());
+                                BareJid jid = getJid(d.toString().split(":")[0]);
+                                trustUser(jid);
                             }
+                        } catch (SmackException.NotConnectedException | IOException | CryptoFailedException | SmackException.NotLoggedInException | SmackException.NoResponseException | InterruptedException e){
+                            e.printStackTrace();
+                        }
+                        if(encrypted == null){
+                            encrypted = omemoManager.encrypt(recipient, message.trim());
+                            System.out.println("Trying to encrypt after trusting some undecided user");
                         }
                         if(encrypted != null) {
                             current = cm.createChat(recipient.asEntityJidIfPossible());
@@ -382,25 +490,34 @@ public class Main {
             }
 
             // Send encrypted OMEMO message to group chat
-            else if(line.startsWith("/mucomemo")) {
-                if(split.length >= 3) {
-                    BareJid mucJid = getJid(split[1]);
+            else if(line.startsWith("/muc")) {
+                if(split.length >= 2) {
+//                    BareJid mucJid = getJid(split[1]);
                     if (mucJid != null) {
                         String message = "";
-                        for (int i = 2; i < split.length; i++) {
+                        for (int i = 1; i < split.length; i++) {
                             message += split[i] + " ";
                         }
                         MultiUserChat muc = mucm.getMultiUserChat(mucJid.asEntityBareJidIfPossible());
+//                        muc.sendMessage(message);
                         OmemoMessage.Sent encrypted = null;
                         try {
+//                            muc.sendMessage(message.trim());
                             encrypted = omemoManager.encrypt(muc, message.trim());
                         } catch (UndecidedOmemoIdentityException e) {
                             System.out.println("There are undecided identities:");
                             for(OmemoDevice d : e.getUndecidedDevices()) {
                                 System.out.println(d.toString());
+                                BareJid jid = getJid(d.toString().split(":")[0]);
+                                trustUser(jid);
                             }
+                        } catch (NoOmemoSupportException e){
+                            e.printStackTrace();
                         }
-
+                        if(encrypted == null){
+                            encrypted = omemoManager.encrypt(muc, message.trim());
+                            System.out.println("Trying to encrypt after trusting some undecided user");
+                        }
                         if(encrypted != null) {
                             Message m = new Message();
                             m.addExtension(encrypted.getElement());
@@ -409,7 +526,71 @@ public class Main {
                     }
                 }
             }
+            else if (line.startsWith("/create")){
+                try {
+                    MultiUserChat muc = mucm.getMultiUserChat(mucJid);
+                    muc.create(nickname);
+                    Form form = muc.getConfigurationForm();
+                    Form answerForm = form.createAnswerForm();
+                    answerForm.setAnswer("muc#roomconfig_roomname", "another_name");
+                    answerForm.setAnswer("muc#roomconfig_roomdesc", "this is room description");
+                    answerForm.setAnswer("muc#roomconfig_persistentroom", true);
+                    answerForm.setAnswer("muc#roomconfig_publicroom", false);
+                    answerForm.setAnswer("muc#roomconfig_whois", Collections.singletonList("anyone"));
+                    answerForm.setAnswer("muc#roomconfig_membersonly", true);
+                    muc.sendConfigurationForm(answerForm);
+                } catch (Exception e){
+                    e.printStackTrace();
+                }
+            }
+            else if (line.startsWith("/info")){
+                RoomInfo info = mucm.getRoomInfo(mucJid);
+                System.out.println();
+                System.out.println("Number of occupants: " + info.getOccupantsCount());
+                System.out.println("Room Subject: " + info.getSubject());
+                System.out.println("Room Contacts: " + info.getContactJids());
+                System.out.println("Room Name: " + info.getName());
+                System.out.println("Room Description: " +info.getDescription());
+                System.out.println("Room Lang: " +info.getLang());
+                System.out.println("Room MembersOnly: " +info.isMembersOnly());
+                System.out.println("Room Moderated: " +info.isModerated());
+                System.out.println("Room PasswordProtected: " +info.isPasswordProtected());
+                System.out.println("Room Persistent: " +info.isPersistent());
+                System.out.println("Room SubjectModifiable: " + info.isSubjectModifiable());
+                System.out.println("Room isNonanonymous: " + info.isNonanonymous());
+                System.out.println("MultiUserChatSupport: " + omemoManager.multiUserChatSupportsOmemo(mucm.getMultiUserChat(mucJid)));
+            }
+            else if (line.startsWith("/join")){
+                try {
+                    MultiUserChat multiUserChat = mucm.getMultiUserChat(mucJid);
+                    multiUserChat.createOrJoin(Resourcepart.from(GJID));
+                } catch (MultiUserChatException.MucAlreadyJoinedException e){
+                    e.printStackTrace();
+                }
+            }
+            else if (line.startsWith("/inviteuser ")){
+                if(split.length>=2) {
+                    MultiUserChat multiUserChat = mucm.getMultiUserChat(mucJid);
+                    multiUserChat.addInvitationRejectionListener((invitee, reason, message, rejection) -> System.out.println("Invitation rejected"));
+                    for (int i = 1; i < split.length; i++) {
+                        multiUserChat.invite(JidCreate.entityBareFrom(split[i] + "@ckotha.com"), "No reason. Just want to talk.");
+                    }
+                }
+            }
+            else if (line.startsWith("/invite")){
 
+                MultiUserChat multiUserChat = mucm.getMultiUserChat(mucJid);
+                multiUserChat.addInvitationRejectionListener((invitee, reason, message, rejection) -> System.out.println("Invitation rejected"));
+                for(int i=1;i<16;i++) {
+                    System.out.println("Inviting "+rootName+i);
+                    multiUserChat.invite(JidCreate.entityBareFrom("p" + i + "@ckotha.com"), "No reason. Just want to talk.");
+                }
+            }
+            else if(line.startsWith("/delete")){
+                MultiUserChat multiUserChat = mucm.getMultiUserChat(mucJid);
+                multiUserChat.destroy("Do I need any reason!", mucJid);
+                System.out.println("Muc deleted successfully");
+            }
             // Display own fingerprint
             else if(line.startsWith("/fingerprint")) {
                 OmemoFingerprint fingerprint = omemoManager.getOwnFingerprint();
@@ -455,7 +636,7 @@ public class Main {
 
             // If no command is entered, assume chat with contact is still active -> send message
             else {
-                if(current != null) {
+                if(current != null && line.length()>0) {
                     if(!omemo) {
                         current.sendMessage(line);
                     } else {
@@ -480,6 +661,10 @@ public class Main {
 
     public static void main(String[] args) {
         try {
+            GJID = args[0];
+            GPASSWORD = args[1];
+            rootName = GJID.substring(0,GJID.length()-1);
+            System.out.println("User: " + GJID);
             Main main = new Main();
             main.start();
         } catch (Exception ignored) {
@@ -587,6 +772,131 @@ public class Main {
             return TrustState.untrusted;
         } catch (FileNotFoundException e) {
             throw new AssertionError(e);
+        }
+    }
+    public void trustUser(BareJid jid) throws IOException, CorruptedOmemoKeyException, CannotEstablishOmemoSessionException, SmackException.NotLoggedInException, SmackException.NoResponseException, SmackException.NotConnectedException, InterruptedException, XMPPException.XMPPErrorException, PubSubException.NotALeafNodeException {
+
+        System.out.println(jid);
+        omemoManager.requestDeviceListUpdateFor(jid);
+        for (OmemoDevice device : omemoManager.getDevicesOf(jid)) {
+            OmemoFingerprint fp = omemoManager.getFingerprint(device);
+
+            if (omemoManager.isDecidedOmemoIdentity(device, fp)) {
+                if (omemoManager.isTrustedOmemoIdentity(device, fp)) {
+                    System.out.println("Status: Trusted");
+                } else {
+                    System.out.println("Status: Untrusted");
+                }
+            } else {
+                System.out.println("Status: Undecided");
+            }
+
+            System.out.println(fp.blocksOf8Chars());
+            String decision = "1";
+            if (decision.equals("0")) {
+                omemoManager.distrustOmemoIdentity(device, fp);
+                System.out.println("Identity has been untrusted.");
+            } else if (decision.equals("1")) {
+                omemoManager.trustOmemoIdentity(device, fp);
+                System.out.println("Identity has been trusted.");
+            }
+        }
+    }
+    public synchronized void sendMucMessage(EntityBareJid mucJid, String message) throws IOException, SmackException.NotLoggedInException, InterruptedException, CannotEstablishOmemoSessionException, PubSubException.NotALeafNodeException, XMPPException.XMPPErrorException, SmackException.NotConnectedException, CorruptedOmemoKeyException, SmackException.NoResponseException, UndecidedOmemoIdentityException, NoOmemoSupportException, CryptoFailedException {
+        if(sendCounter == totalNumberOfMessage) return;
+        Thread.sleep(1000);
+        if (mucJid != null) {
+            MultiUserChat muc = mucm.getMultiUserChat(mucJid.asEntityBareJidIfPossible());
+            OmemoMessage.Sent encrypted = null;
+            try {
+                encrypted = omemoManager.encrypt(muc, message.trim());
+            } catch (UndecidedOmemoIdentityException e) {
+                System.out.println("There are undecided identities:");
+                for(OmemoDevice d : e.getUndecidedDevices()) {
+                    System.out.println(d.toString());
+                    BareJid jid = getJid(d.toString().split(":")[0]);
+                    trustUser(jid);
+                }
+            } catch (NoOmemoSupportException | SmackException.NotConnectedException | IOException | CryptoFailedException | SmackException.NotLoggedInException | XMPPException.XMPPErrorException | SmackException.NoResponseException | InterruptedException e){
+                e.printStackTrace();
+            }
+            if(encrypted == null){
+                encrypted = omemoManager.encrypt(muc, message.trim());
+                System.out.println("Trying to encrypt after trusting some undecided user");
+            }
+            if(encrypted != null) {
+                Message m = new Message();
+                m.addExtension(encrypted.getElement());
+                muc.sendMessage(m);
+                sendCounter++;
+            }
+        }
+    }
+
+	public void delete_invalid_Directory() {
+            File new_target = new File(storePath, "OMEMO_Store" + File.separator +
+                    jidname+"%40ckotha.com" + File.separator +
+                    "-1");
+
+            if (new_target.exists()) {
+                System.out.println("got -1 +++++++++++++++++++++++So Quit++++++++++++++++++");
+                //scanner.close();
+                connection.disconnect();
+
+                File new_target1 = new File(storePath, "OMEMO_Store");
+                System.out.println("new_target1:" + new_target1);
+
+              boolean isDeleted =deleteDir(new_target1);
+              if(isDeleted){
+                    System.out.println("folder is deleted");
+                }
+                else{
+                    System.out.println("folder is not deleted");
+                }
+            }
+        }
+
+
+    public static boolean deleteDir(File dir) {
+        if (dir.isDirectory()) {
+//            String[] children = dir.list();
+//            for (int i = 0; i < children.length; i++) {
+//                System.out.println(dir);
+//                boolean success = deleteDir(new File(dir, children[i]));
+//                if (!success) {
+//                    return false;
+//                }
+//            }
+            for(File child :dir.listFiles()){
+                deleteDir(child);
+            }
+
+        }
+        return dir.delete();
+    }
+
+    private synchronized void increaseReceiveCounter(){
+        receiveCounter++;
+    }
+    public void trust(BareJid jid) throws InterruptedException, PubSubException.NotALeafNodeException, SmackException.NoResponseException, SmackException.NotConnectedException, XMPPException.XMPPErrorException, IOException, SmackException.NotLoggedInException, CorruptedOmemoKeyException, CannotEstablishOmemoSessionException {
+        omemoManager.requestDeviceListUpdateFor(jid);
+
+        for (OmemoDevice device : omemoManager.getDevicesOf(jid)) {
+            OmemoFingerprint fp = omemoManager.getFingerprint(device);
+
+            if (omemoManager.isDecidedOmemoIdentity(device, fp)) {
+                if (omemoManager.isTrustedOmemoIdentity(device, fp)) {
+                    System.out.println("Status: Trusted");
+                } else {
+                    System.out.println("Status: Untrusted");
+                }
+            } else {
+                System.out.println("Status: Undecided");
+            }
+
+            System.out.println(fp.blocksOf8Chars());
+            omemoManager.trustOmemoIdentity(device, fp);
+            System.out.println("Identity has been trusted.");
         }
     }
 }
